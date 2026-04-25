@@ -1,44 +1,69 @@
+"""Linear and multimodal ridge models predicting fMRI BOLD frame deltas."""
+
+from typing import Sequence
+
 import numpy as np
 import torch
+from sklearn.decomposition import PCA
+
 import utils
 
 
 class Preprocessor:
+    """Build train/test pairs of (stimulus features, fMRI voxel volumes).
 
-    """Preprocesses data for the model. Splits the sample into train and test using the dt parameter."""
+    Parameters
+    ----------
+    vector_list : np.ndarray
+        Stimulus feature matrix of shape ``(n_frames, d)``.
+    sub : data_loading.Sub
+        Subject providing the BOLD volume.
+    dt : float
+        Hemodynamic delay in seconds; the model predicts the BOLD volume
+        ``mu * dt`` TRs after the stimulus frame.
+    coef : int
+        AvgPool factor applied to the BOLD volume (``coef == 1`` means no
+        spatial downsampling).
+    train_size : float, default 0.7
+        Fraction of TRs used for training.
+    """
 
-    def __init__(self, vector_list, sub, dt, coef, train_size=0.7):
-        # print("ll", vector_list[len(vector_list)-1])
+    def __init__(
+        self,
+        vector_list: np.ndarray,
+        sub,
+        dt: float,
+        coef: int,
+        train_size: float = 0.7,
+    ) -> None:
         self.vector_list = vector_list
         self.sub = sub
         self.dt = dt
         self.coef = coef
         self.train_size = train_size
 
-        self.nu = 25  # частота видео
-        self.mu = 641. / 390.  # частота снимков фМРТ
-        self.d1 = self.sub.tensor.shape[0]  # размерности снимка фМРТ до сжатия
+        self.nu = 25                  # Stimulus frame rate (Hz).
+        self.mu = 641.0 / 390.0       # fMRI sampling rate (TR per second).
+        self.d1 = self.sub.tensor.shape[0]
         self.d2 = self.sub.tensor.shape[1]
         self.d3 = self.sub.tensor.shape[2]
         self.d4 = self.sub.tensor.shape[3]
-        self.d = 2048  # длина вектора признакового описания изображения
-        self.N = 641 - int(self.mu * self.dt)  # N - количество снимков фМРТ
+        self.N = 641 - int(self.mu * self.dt)
 
         self.train, self.test = self.get_train_test()
-        
 
     def get_train_test(self):
-        pairs = [(int(i * self.nu / self.mu), int(self.mu * self.dt + i))
-                 for i in range(self.N)]  # (номер изображения, номер снимка)
+        """Build matched ``(stimulus_vector, voxel_volume)`` train/test pairs."""
+        pairs = [
+            (int(i * self.nu / self.mu), int(self.mu * self.dt + i))
+            for i in range(self.N)
+        ]
 
-        if (self.coef > 1):  # сжатие снимка фМРТ
-            #maxpool = torch.nn.MaxPool3d(
-            #    kernel_size=self.coef, stride=self.coef)
-            maxpool = torch.nn.AvgPool3d(
-                kernel_size=self.coef, stride=self.coef)
-            input_tensor = self.sub.tensor.permute(3, 0, 1, 2)
-            output_tensor = maxpool(input_tensor).permute(1, 2, 3, 0)
-            self.sub._tensor = output_tensor
+        if self.coef > 1:
+            maxpool = torch.nn.AvgPool3d(kernel_size=self.coef, stride=self.coef)
+            self.sub._tensor = maxpool(
+                self.sub.tensor.permute(3, 0, 1, 2)
+            ).permute(1, 2, 3, 0)
         else:
             self.sub._tensor = self.sub.tensor
 
@@ -46,132 +71,424 @@ class Preprocessor:
         self._d2 = self.sub._tensor.shape[1]
         self._d3 = self.sub._tensor.shape[2]
         self._d4 = self.sub._tensor.shape[3]
-       
-        scans_list = [self.sub._tensor[:, :, :, i]
-                      for i in range(self.d4)]  # список тензоров снимков фМРТ
-       
-        # список снимков фМРТ, развернутых в векторы
-        voxels = [scan.reshape(self._d1 * self._d2 * self._d3).numpy()
-                  for scan in scans_list]
-        
-        data = [(self.vector_list[n], voxels[k])
-                for n, k in pairs]  # (изображение, снимок)
-        
 
-        # train, test
-        
-        l = int(self.train_size * self.d4)  # размер обучающей выборки
+        voxels = [
+            self.sub._tensor[:, :, :, i].reshape(self._d1 * self._d2 * self._d3).numpy()
+            for i in range(self._d4)
+        ]
+
+        data = [(self.vector_list[n], voxels[k]) for n, k in pairs]
+
+        l = int(self.train_size * self._d4)
         train, test = data[:l], data[l:]
-        train_voxels = np.array([pair[1] for pair in train])
-        test_voxels = np.array([pair[1] for pair in test])
-        min_train = np.min(train_voxels)
-        max_train = np.max(train_voxels)
-        train_voxels = (train_voxels - min_train) / (max_train - min_train)
-        test_voxels = (test_voxels - min_train) / (max_train - min_train)
 
-        train = [(pair[0], train_voxel) for pair, train_voxel in zip(train, train_voxels)]
-        test = [(pair[0], test_voxel) for pair, test_voxel in zip(test, test_voxels)]
+        # Min-max normalise voxels using training-set statistics only.
+        train_voxels = np.array([p[1] for p in train])
+        test_voxels = np.array([p[1] for p in test])
+        mn, mx = np.min(train_voxels), np.max(train_voxels)
+        train_voxels = (train_voxels - mn) / (mx - mn)
+        test_voxels = (test_voxels - mn) / (mx - mn)
 
+        train = [(p[0], tv) for p, tv in zip(train, train_voxels)]
+        test = [(p[0], tv) for p, tv in zip(test, test_voxels)]
         return train, test
 
 
 class LinearModel(Preprocessor):
+    """Ridge regression predicting the next fMRI scan from a stimulus vector."""
 
-    """Model that predict next fMRI scan."""
-
-    def __init__(self, vector_list, sub, dt, coef, alpha, train_size=0.7):
+    def __init__(
+        self,
+        vector_list: np.ndarray,
+        sub,
+        dt: float,
+        coef: int,
+        alpha: float,
+        train_size: float = 0.7,
+    ) -> None:
         super().__init__(vector_list, sub, dt, coef, train_size)
         self.delta = False
         self.alpha = alpha
-        self.X_train, self.Y_train, self.X_test, self.Y_test = self.get_XY()
+        self.X_train, self.Y_train, self.X_test, self.Y_test = self._get_XY()
 
-    def get_XY(self):
-        X_train = np.array([pair[0] for pair in self.train])
-        Y_train = np.array([pair[1] for pair in self.train]).T
-        X_test = np.array([pair[0] for pair in self.test])
-        Y_test = np.array([pair[1] for pair in self.test]).T
-        return X_train, Y_train, X_test, Y_test
+    def _get_XY(self):
+        return (
+            np.array([p[0] for p in self.train]),
+            np.array([p[1] for p in self.train]).T,
+            np.array([p[0] for p in self.test]),
+            np.array([p[1] for p in self.test]).T,
+        )
 
-    def fit(self):
-        W = []  # матрица весов модели
-
-        if (self.alpha > 0):
-            A = np.linalg.inv(self.X_train.T @ self.X_train + self.alpha *
-                              np.identity(self.X_train.shape[1])) @ self.X_train.T
+    def fit(self) -> None:
+        """Fit per-voxel ridge regression in closed form."""
+        if self.alpha > 0:
+            A = (
+                np.linalg.inv(
+                    self.X_train.T @ self.X_train
+                    + self.alpha * np.eye(self.X_train.shape[1])
+                )
+                @ self.X_train.T
+            )
         else:
             A = np.linalg.pinv(self.X_train)
+        self.W = (A @ self.Y_train.T).T
 
-        for i in range(self._d1 * self._d2 * self._d3):
-            Y_train_vector = self.Y_train[i]
-            w = A @ Y_train_vector
-            W.append(w)
-
-        self.W = np.array(W)  # w будут строками
-
-    def predict(self):
+    def predict(self) -> None:
+        """Compute predicted train and test BOLD volumes."""
         self.Y_train_predicted = self.W @ self.X_train.T
         self.Y_test_predicted = self.W @ self.X_test.T
 
-    def evaluate(self):
+    def evaluate(self) -> None:
+        """Compute and store train/test MSE."""
         self.MSE_train = utils.MSE(self.Y_train_predicted - self.Y_train)
         self.MSE_test = utils.MSE(self.Y_test_predicted - self.Y_test)
 
+
 class LinearDeltaModel(Preprocessor):
+    """Ridge regression predicting the frame-to-frame fMRI difference (delta)."""
 
-    """Model that predict the difference between current and next fMRI scans."""
-
-    def __init__(self, vector_list, sub, dt, coef, alpha, train_size=0.7):
+    def __init__(
+        self,
+        vector_list: np.ndarray,
+        sub,
+        dt: float,
+        coef: int,
+        alpha: float,
+        train_size: float = 0.7,
+    ) -> None:
         super().__init__(vector_list, sub, dt, coef, train_size)
         self.delta = True
         self.alpha = alpha
-        self.X_train, self.Y_train, self.deltaY_train, self.X_test, self.Y_test, self.deltaY_test = self.get_XY()
+        (
+            self.X_train, self.Y_train, self.deltaY_train,
+            self.X_test, self.Y_test, self.deltaY_test,
+        ) = self._get_XY_delta()
 
-    def get_XY(self):
-        delta_train = [(self.train[n][0], self.train[n][1] -
-                        self.train[n-1][1]) for n in range(1, len(self.train))]
-        delta_test = [(self.test[n][0], self.test[n][1] - self.test[n-1][1])
-                      for n in range(1, len(self.test))]
-        Y_train = np.array([pair[1] for pair in self.train]).T
-        Y_test = np.array([pair[1] for pair in self.test]).T
-        X_train = np.array([pair[0] for pair in delta_train])
-        deltaY_train = np.array([pair[1] for pair in delta_train]).T
-        X_test = np.array([pair[0] for pair in delta_test])
-        deltaY_test = np.array([pair[1] for pair in delta_test]).T
-        return X_train, Y_train, deltaY_train, X_test, Y_test, deltaY_test
+    def _get_XY_delta(self):
+        delta_train = [
+            (self.train[n][0], self.train[n][1] - self.train[n - 1][1])
+            for n in range(1, len(self.train))
+        ]
+        delta_test = [
+            (self.test[n][0], self.test[n][1] - self.test[n - 1][1])
+            for n in range(1, len(self.test))
+        ]
+        return (
+            np.array([p[0] for p in delta_train]),
+            np.array([p[1] for p in self.train]).T,
+            np.array([p[1] for p in delta_train]).T,
+            np.array([p[0] for p in delta_test]),
+            np.array([p[1] for p in self.test]).T,
+            np.array([p[1] for p in delta_test]).T,
+        )
 
-    def fit(self):
-        W = []  # матрица весов модели
-
-        if (self.alpha > 0):
-            A = np.linalg.inv(self.X_train.T @ self.X_train + self.alpha *
-                              np.identity(self.X_train.shape[1])) @ self.X_train.T
+    def fit(self) -> None:
+        """Fit per-voxel ridge regression on training deltas."""
+        if self.alpha > 0:
+            A = (
+                np.linalg.inv(
+                    self.X_train.T @ self.X_train
+                    + self.alpha * np.eye(self.X_train.shape[1])
+                )
+                @ self.X_train.T
+            )
         else:
             A = np.linalg.pinv(self.X_train)
+        self.W = (A @ self.deltaY_train.T).T
 
-        for i in range(self._d1 * self._d2 * self._d3):
-            deltaY_train_vector = self.deltaY_train[i]
-            w = A @ deltaY_train_vector
-            W.append(w)
-
-        self.W = np.array(W)  # w будут строками
-
-    def predict(self):
+    def predict(self) -> None:
+        """Predict deltas and reconstruct absolute BOLD volumes."""
         self.deltaY_train_predicted = self.W @ self.X_train.T
         self.deltaY_test_predicted = self.W @ self.X_test.T
-        self.Y_train_predicted = np.delete(
-            self.Y_train, -1, 1) + self.deltaY_train_predicted
-        self.Y_test_predicted = np.delete(
-            self.Y_test, -1, 1) + self.deltaY_test_predicted
+        self.Y_train_predicted = (
+            np.delete(self.Y_train, -1, 1) + self.deltaY_train_predicted
+        )
+        self.Y_test_predicted = (
+            np.delete(self.Y_test, -1, 1) + self.deltaY_test_predicted
+        )
 
-    def evaluate(self, Y_test_predicted=None):
+    def evaluate(self, Y_test_predicted: np.ndarray | None = None):
+        """Compute MSE; if ``Y_test_predicted`` is given, return its test MSE."""
         if Y_test_predicted is None:
-            self.MSE_train = utils.MSE(self.Y_train_predicted - np.delete(self.Y_train, 0, 1))
-            self.MSE_test = utils.MSE(self.Y_test_predicted - np.delete(self.Y_test, 0, 1))
-        else:
-            return utils.MSE(Y_test_predicted - np.delete(self.Y_test, 0, 1))
+            self.MSE_train = utils.MSE(
+                self.Y_train_predicted - np.delete(self.Y_train, 0, 1)
+            )
+            self.MSE_test = utils.MSE(
+                self.Y_test_predicted - np.delete(self.Y_test, 0, 1)
+            )
+            return None
+        return utils.MSE(Y_test_predicted - np.delete(self.Y_test, 0, 1))
 
-    def repredict(self, W):
-        deltaY_test_predicted = W @ self.X_test.T
-        Y_test_predicted = np.delete(
-            self.Y_test, -1, 1) + deltaY_test_predicted
-        return Y_test_predicted
+    def repredict(self, W: np.ndarray) -> np.ndarray:
+        """Re-apply a (possibly modified) weight matrix to the test set."""
+        dY = W @ self.X_test.T
+        return np.delete(self.Y_test, -1, 1) + dY
+
+
+class MultimodalPreprocessor(Preprocessor):
+    """Preprocessor with optional PCA applied to the full feature matrix.
+
+    The feature matrix is assumed to be already normalised per modality (see
+    :func:`data_loading.get_multimodal_encoding` with ``normalize=True``).
+    """
+
+    def __init__(
+        self,
+        vector_list: np.ndarray,
+        sub,
+        dt: float,
+        coef: int,
+        pca_components: int | None,
+        train_size: float = 0.7,
+    ) -> None:
+        self.pca_components = pca_components
+        self.pca = None
+
+        if pca_components is not None and pca_components < vector_list.shape[1]:
+            print(f"[PCA] {vector_list.shape[1]} → {pca_components} components")
+            self.pca = PCA(n_components=pca_components, random_state=42)
+            vector_list = self.pca.fit_transform(vector_list)
+            print(
+                f"[PCA] Explained variance: "
+                f"{self.pca.explained_variance_ratio_.sum() * 100:.1f}%"
+            )
+
+        super().__init__(vector_list, sub, dt, coef, train_size)
+
+
+class MultimodalLinearDeltaModel(MultimodalPreprocessor):
+    """Predict frame-to-frame fMRI delta from concatenated audio + video features.
+
+    Banded ridge regression
+    -----------------------
+    A separate regularisation coefficient is applied to each modality block:
+
+    .. code-block:: text
+
+        min  ‖δ - X θ‖²  +  α_v ‖θ_video‖²  +  α_a ‖θ_audio‖²
+         θ
+
+    This is equivalent to a block-diagonal penalty matrix
+    ``Λ = diag(α_v · I_{d_v}, α_a · I_{d_a})`` and the closed-form solution
+    ``θ = (XᵀX + Λ)⁻¹ Xᵀ δ``.
+
+    Why banded ridge?
+    -----------------
+    ViT features (768-d) and MFCC features (15-d) live in very different
+    spaces and carry different amounts of information per dimension.  A
+    single global alpha either over-regularises the audio block (making it
+    invisible) or under-regularises the video block (causing overfitting on
+    video noise).  Separate alphas let each modality contribute optimally.
+
+    Note: when PCA is enabled the modality blocks are mixed, so banded ridge
+    is not applicable — only the global ``alpha_video`` is used in that case.
+
+    Parameters
+    ----------
+    vector_list : np.ndarray
+        Pre-built, per-modality normalised multimodal features of shape
+        ``(n_frames, d_video + d_audio)``.
+    sub : data_loading.Sub
+        Subject providing the BOLD volume.
+    dt : float
+        Hemodynamic delay in seconds.
+    coef : int
+        AvgPool factor for the BOLD volume.
+    alpha_video : float
+        Ridge penalty for the video block (or global penalty when PCA is used).
+    alpha_audio : float
+        Ridge penalty for the audio block (ignored when PCA is used).
+    X_video, X_audio : np.ndarray, optional
+        Individual modality arrays returned by
+        :func:`data_loading.get_multimodal_encoding`.  Required when
+        ``pca_components is None`` (banded ridge).
+    pca_components : int, optional
+        If set, apply PCA to the full multimodal matrix before fitting.
+    train_size : float, default 0.7
+        Fraction of TRs used for training.
+    """
+
+    def __init__(
+        self,
+        vector_list: np.ndarray,
+        sub,
+        dt: float,
+        coef: int,
+        alpha_video: float,
+        alpha_audio: float,
+        X_video: np.ndarray | None = None,
+        X_audio: np.ndarray | None = None,
+        pca_components: int | None = None,
+        train_size: float = 0.7,
+    ) -> None:
+        self.alpha_video = alpha_video
+        self.alpha_audio = alpha_audio
+        self._X_video_full = X_video
+        self._X_audio_full = X_audio
+
+        super().__init__(vector_list, sub, dt, coef, pca_components, train_size)
+        self.delta = True
+
+        (
+            self.X_train, self.Y_train, self.deltaY_train,
+            self.X_test, self.Y_test, self.deltaY_test,
+        ) = self._get_XY_delta()
+
+    def _get_XY_delta(self):
+        delta_train = [
+            (self.train[n][0], self.train[n][1] - self.train[n - 1][1])
+            for n in range(1, len(self.train))
+        ]
+        delta_test = [
+            (self.test[n][0], self.test[n][1] - self.test[n - 1][1])
+            for n in range(1, len(self.test))
+        ]
+        return (
+            np.array([p[0] for p in delta_train]),
+            np.array([p[1] for p in self.train]).T,
+            np.array([p[1] for p in delta_train]).T,
+            np.array([p[0] for p in delta_test]),
+            np.array([p[1] for p in self.test]).T,
+            np.array([p[1] for p in delta_test]).T,
+        )
+
+    def _build_penalty(self) -> np.ndarray:
+        """Return the diagonal of the block-diagonal penalty matrix Λ.
+
+        When PCA is active the modality blocks are mixed, so the penalty
+        falls back to a uniform value of ``alpha_video``.
+        """
+        d = self.X_train.shape[1]
+
+        if self.pca is not None:
+            print("[BandedRidge] PCA active → uniform alpha =", self.alpha_video)
+            return np.full(d, self.alpha_video)
+
+        if self._X_video_full is None or self._X_audio_full is None:
+            raise ValueError(
+                "Pass X_video and X_audio to MultimodalLinearDeltaModel "
+                "to use banded ridge without PCA."
+            )
+
+        d_video = self._X_video_full.shape[1]
+        d_audio = self._X_audio_full.shape[1]
+
+        if d_video + d_audio != d:
+            raise ValueError(
+                f"X_video ({d_video}) + X_audio ({d_audio}) ≠ "
+                f"vector_list dim ({d})."
+            )
+
+        return np.concatenate([
+            np.full(d_video, self.alpha_video),
+            np.full(d_audio, self.alpha_audio),
+        ])
+
+    def fit(self) -> None:
+        """Fit per-voxel banded ridge regression on training deltas."""
+        Lambda = self._build_penalty()
+        XtX = self.X_train.T @ self.X_train
+        A = np.linalg.inv(XtX + np.diag(Lambda)) @ self.X_train.T
+        self.W = (A @ self.deltaY_train.T).T
+
+    def predict(self) -> None:
+        """Predict deltas and reconstruct absolute BOLD volumes."""
+        self.deltaY_train_predicted = self.W @ self.X_train.T
+        self.deltaY_test_predicted = self.W @ self.X_test.T
+        self.Y_train_predicted = (
+            np.delete(self.Y_train, -1, 1) + self.deltaY_train_predicted
+        )
+        self.Y_test_predicted = (
+            np.delete(self.Y_test, -1, 1) + self.deltaY_test_predicted
+        )
+
+    def evaluate(self, Y_test_predicted: np.ndarray | None = None):
+        """Compute MSE; if ``Y_test_predicted`` is given, return its test MSE."""
+        if Y_test_predicted is None:
+            self.MSE_train = utils.MSE(
+                self.Y_train_predicted - np.delete(self.Y_train, 0, 1)
+            )
+            self.MSE_test = utils.MSE(
+                self.Y_test_predicted - np.delete(self.Y_test, 0, 1)
+            )
+            return None
+        return utils.MSE(Y_test_predicted - np.delete(self.Y_test, 0, 1))
+
+    def repredict(self, W: np.ndarray) -> np.ndarray:
+        """Re-apply a (possibly modified) weight matrix to the test set."""
+        return np.delete(self.Y_test, -1, 1) + W @ self.X_test.T
+
+    def modality_mse(self) -> dict:
+        """Return MSE when using only the video- or only the audio-block weights.
+
+        Only available without PCA (modalities must remain separable).
+        """
+        if not hasattr(self, "W"):
+            raise RuntimeError("Call fit() first.")
+        if self.pca is not None:
+            print("[modality_mse] Not available with PCA (modalities are mixed).")
+            return {"audio": None, "video": None, "multimodal": self.MSE_test}
+
+        d_video = self._X_video_full.shape[1]
+
+        W_video = self.W.copy()
+        W_video[:, d_video:] = 0.0
+        W_audio = self.W.copy()
+        W_audio[:, :d_video] = 0.0
+
+        return {
+            "video": self.evaluate(self.repredict(W_video)),
+            "audio": self.evaluate(self.repredict(W_audio)),
+            "multimodal": self.MSE_test,
+        }
+
+    @staticmethod
+    def grid_search_alpha(
+        vector_list: np.ndarray,
+        X_video: np.ndarray,
+        X_audio: np.ndarray,
+        sub,
+        dt: float,
+        coef: int,
+        alpha_video_grid: Sequence[float],
+        alpha_audio_grid: Sequence[float],
+        train_size: float = 0.7,
+    ) -> tuple[float, float, float]:
+        """Exhaustive grid search over ``(alpha_video, alpha_audio)``.
+
+        Returns
+        -------
+        best_alpha_video, best_alpha_audio, best_mse : tuple of float
+        """
+        best_mse = np.inf
+        best_av, best_aa = None, None
+
+        total = len(alpha_video_grid) * len(alpha_audio_grid)
+        done = 0
+        for av in alpha_video_grid:
+            for aa in alpha_audio_grid:
+                m = MultimodalLinearDeltaModel(
+                    vector_list=vector_list,
+                    sub=sub, dt=dt, coef=coef,
+                    alpha_video=av, alpha_audio=aa,
+                    X_video=X_video, X_audio=X_audio,
+                    pca_components=None,
+                    train_size=train_size,
+                )
+                m.fit()
+                m.predict()
+                m.evaluate()
+                done += 1
+                print(
+                    f"  [{done}/{total}] α_v={av:.0e}  α_a={aa:.0e}  "
+                    f"MSE={m.MSE_test:.3e}"
+                )
+                if m.MSE_test < best_mse:
+                    best_mse = m.MSE_test
+                    best_av, best_aa = av, aa
+
+        print(
+            f"\n→ Best: α_video={best_av:.0e}  α_audio={best_aa:.0e}  "
+            f"MSE={best_mse:.3e}"
+        )
+        return best_av, best_aa, best_mse
