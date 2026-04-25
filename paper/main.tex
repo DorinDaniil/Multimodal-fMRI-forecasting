@@ -1,0 +1,175 @@
+\documentclass{article}
+\input{new_commands}
+
+% if you need to pass options to natbib, use, e.g.:
+\PassOptionsToPackage{numbers, sort, compress}{natbib}
+% before loading neurips_2024
+
+
+% ready for submission
+%\usepackage{neurips_2024}
+
+
+% to compile a preprint version, e.g., for submission to arXiv, add add the
+% [preprint] option:
+\usepackage[preprint]{neurips_2024}
+
+
+% to compile a camera-ready version, add the [final] option, e.g.:
+%     \usepackage[final]{neurips_2024}
+
+
+% to avoid loading the natbib package, add option nonatbib:
+%    \usepackage[nonatbib]{neurips_2024}
+
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+
+%%%
+
+\usepackage{subcaption}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsthm}
+\usepackage{mathrsfs}
+\usepackage{xcolor}
+\usepackage{textcomp}
+\usepackage{manyfoot}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{listings}
+
+\newtheorem{theorem}{Theorem} % continuous numbers
+%%\newtheorem{theorem}{Theorem}[section] % sectionwise numbers
+%% optional argument [theorem] produces theorem numbering sequence instead of independent numbers for Proposition
+\newtheorem{proposition}[theorem]{Proposition}% 
+\newtheorem{lemma}{Lemma}% 
+%%\newtheorem{proposition}{Proposition} % to get separate numbers for theorem and proposition etc.
+
+\newtheorem{example}{Example}
+\newtheorem{remark}{Remark}
+
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+
+%%%
+
+
+\title{Approximation fMRI data from the audio time series}
+
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to LaTeX to determine where to break the
+% lines. Using \AND forces a line break at that point. So, if LaTeX puts 3 of 4
+% authors names on the first line, and the last on the second line, try using
+% \AND instead of \And before the third author name.
+
+
+\author{%
+  Anastasia German\\
+  MIPT\\
+  Moscow, Russia\\
+  \texttt{german.aia@phystech.edu}\\
+  \And
+  Daniil Dorin\\
+  MIPT\\
+  Moscow, Russia\\
+  \texttt{dorin.dd.contact@gmail.com}\\
+}
+
+
+\begin{document}
+
+
+\maketitle
+
+\begin{abstract}
+   Nowadays understanding how the brain perceives and processes external stimuli is essential for advancing neuroscience and improving diagnostic tools. In this article, we explore the relationship between human perception of the outside world and fMRI scanner readings. The analysis focuses on the correlation between a sequence of fMRI images and an auditory signal. A method for predicting fMRI readings based on the auditory sequence is proposed. The task of predicting complex, non-linear time series, influenced by exogenous factors and exhibiting multiple periodicities, is approached through the application of the Granger causality test.
+
+
+    
+    TODO
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+
+The human brain is one of the most complex and fascinating mechanisms to study. It governs our psychological state, perception of the external world, and numerous cognitive functions. Understanding its processes is crucial for diagnosing and treating various neurological and psychiatric disorders.
+
+Functional Magnetic Resonance Imaging (fMRI)\cite{article1} is a neuroimaging technique that measures brain activity by detecting changes in blood flow. The Blood-Oxygen-Level-Dependent (BOLD) signal\cite{article2}, which reflects variations in oxygenated blood levels, serves as a key indicator of neural activity. fMRI has been widely applied in neuroscience research, including the study of brain function in conditions such as autism and Alzheimer's disease\cite{article3}, as well as in predicting and potentially treating disorders like traumatic brain injuries.
+
+This study aims to investigate the relationship between fMRI time-series images and corresponding auditory features extracted from a movie soundtrack. Specifically, Mel-Frequency Cepstral Coefficients (MFCCs) \cite{article4} are used to represent the audio signal. These features, derived from the spectrogram, are widely utilized in speech and sound analysis due to their compact representation. The dataset \cite{article5} consists of fMRI recordings from 30 participants, aged 7 to 47, collected while they watched a short audiovisual film containing dialogues and musical segments.
+
+We hypothesize the existence of a relationship between fMRI signals and auditory stimuli, considering a constant time lag between them as a hyperparameter \cite{article6}. The study explores the feasibility of approximating fMRI responses based on the auditory input and examines how different types of audio (speech vs. music) influence BOLD signal variations. Additionally, we address one of the limitations of the BOLD signal—its temporal resolution. Due to the inherent delay in fMRI measurements, capturing rapid neural events is challenging. Furthermore, we take into account structural properties of time series data, such as trends in voxel activity and noise heterogeneity, which may require appropriate statistical adjustments.
+
+
+
+
+\textbf{Contributions.} Our contributions can be summarized as follows:
+\begin{itemize}
+    \item We present...
+    \item We demonstrate the validity of our theoretical results through empirical studies...
+    \item We highlight the implications of our findings for...
+\end{itemize}
+
+\textbf{Outline.} The rest of the paper is organized as follows...
+
+\section{Related Work}\label{sec:rw}
+
+\textbf{Topic \#1.}
+TODO
+
+\textbf{Topic \#2.}
+TODO
+
+\section{Preliminaries}\label{sec:prelim}
+
+\subsection{General notation}
+
+In this section, we introduce the general notation used in the rest of the paper and the basic assumptions. 
+
+\subsection{Assumptions} 
+
+TODO
+
+\section{Experiments}\label{sec:exp}
+
+To verify the theoretical estimates obtained, we conducted a detailed empirical study...
+
+\section{Discussion}\label{sec:disc}
+
+TODO
+
+\section{Conclusion}\label{sec:concl}
+
+TODO
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newpage
+\appendix
+\section{Appendix / supplemental material}\label{app}
+
+\subsection{Additional experiments}\label{app:exp}
+
+TODO
+
+\end{document}
