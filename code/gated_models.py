@@ -242,25 +242,40 @@ class GatedMultimodalLinearDeltaModel(Preprocessor):
         self._delta_v_test = delta_v_test
         self._delta_a_test = delta_a_test
 
-    def evaluate(self) -> None:
-        """Compute and store train / test MSE."""
+    def evaluate(self, mask: np.ndarray | None = None) -> None:
+        """Compute and store train / test MSE.
+
+        Parameters
+        ----------
+        mask : np.ndarray of dtype bool, optional
+            1-D voxel mask passed through to :func:`utils.MSE`.  When set,
+            MSE is averaged only over the selected voxels (e.g. a brain
+            mask), so background air does not dominate the score.
+        """
         self.MSE_train = utils.MSE(
-            self.Y_train_predicted - np.delete(self.Y_train, 0, 1)
+            self.Y_train_predicted - np.delete(self.Y_train, 0, 1), mask=mask
         )
         self.MSE_test = utils.MSE(
-            self.Y_test_predicted - np.delete(self.Y_test, 0, 1)
+            self.Y_test_predicted - np.delete(self.Y_test, 0, 1), mask=mask
         )
 
     # ------------------------------------------------------------------ #
     # Diagnostics
     # ------------------------------------------------------------------ #
 
-    def modality_mse(self) -> dict:
+    def modality_mse(self, mask: np.ndarray | None = None) -> dict:
         """Return test-set MSE for video-only, audio-only, and gated models.
 
         Useful sanity check: the gated MSE should not exceed
         ``min(video, audio)``; if it does, ``alpha_video`` / ``alpha_audio``
         are likely mis-tuned.
+
+        Parameters
+        ----------
+        mask : np.ndarray of dtype bool, optional
+            1-D voxel mask.  When set, all three MSEs are averaged only
+            over the selected voxels.  ``self.MSE_test`` is recomputed
+            under the same mask for a fair comparison.
         """
         if not hasattr(self, "_delta_v_test"):
             raise RuntimeError("Call predict() before modality_mse().")
@@ -269,10 +284,11 @@ class GatedMultimodalLinearDeltaModel(Preprocessor):
         Y_v = np.delete(self.Y_test, -1, 1) + self._delta_v_test
         Y_a = np.delete(self.Y_test, -1, 1) + self._delta_a_test
 
+        gated_mse = utils.MSE(self.Y_test_predicted - true_test, mask=mask)
         return {
-            "video": utils.MSE(Y_v - true_test),
-            "audio": utils.MSE(Y_a - true_test),
-            "gated": self.MSE_test,
+            "video": utils.MSE(Y_v - true_test, mask=mask),
+            "audio": utils.MSE(Y_a - true_test, mask=mask),
+            "gated": gated_mse,
         }
 
     def alpha_volume(self) -> np.ndarray:

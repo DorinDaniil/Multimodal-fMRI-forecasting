@@ -138,10 +138,22 @@ class LinearModel(Preprocessor):
         self.Y_train_predicted = self.W @ self.X_train.T
         self.Y_test_predicted = self.W @ self.X_test.T
 
-    def evaluate(self) -> None:
-        """Compute and store train/test MSE."""
-        self.MSE_train = utils.MSE(self.Y_train_predicted - self.Y_train)
-        self.MSE_test = utils.MSE(self.Y_test_predicted - self.Y_test)
+    def evaluate(self, mask: np.ndarray | None = None) -> None:
+        """Compute and store train/test MSE.
+
+        Parameters
+        ----------
+        mask : np.ndarray of dtype bool, optional
+            1-D voxel mask; when provided, MSE is averaged only over the
+            selected voxels (e.g. brain ∩ confidence).  Length must match
+            ``Y_train.shape[0]`` / ``Y_test.shape[0]``.
+        """
+        self.MSE_train = utils.MSE(
+            self.Y_train_predicted - self.Y_train, mask=mask
+        )
+        self.MSE_test = utils.MSE(
+            self.Y_test_predicted - self.Y_test, mask=mask
+        )
 
 
 class LinearDeltaModel(Preprocessor):
@@ -207,17 +219,34 @@ class LinearDeltaModel(Preprocessor):
             np.delete(self.Y_test, -1, 1) + self.deltaY_test_predicted
         )
 
-    def evaluate(self, Y_test_predicted: np.ndarray | None = None):
-        """Compute MSE; if ``Y_test_predicted`` is given, return its test MSE."""
+    def evaluate(
+        self,
+        Y_test_predicted: np.ndarray | None = None,
+        mask: np.ndarray | None = None,
+    ):
+        """Compute MSE; if ``Y_test_predicted`` is given, return its test MSE.
+
+        Parameters
+        ----------
+        Y_test_predicted : np.ndarray, optional
+            If provided, return the test MSE of this prediction without
+            mutating ``self``.
+        mask : np.ndarray of dtype bool, optional
+            1-D voxel mask passed through to :func:`utils.MSE`.
+        """
         if Y_test_predicted is None:
             self.MSE_train = utils.MSE(
-                self.Y_train_predicted - np.delete(self.Y_train, 0, 1)
+                self.Y_train_predicted - np.delete(self.Y_train, 0, 1),
+                mask=mask,
             )
             self.MSE_test = utils.MSE(
-                self.Y_test_predicted - np.delete(self.Y_test, 0, 1)
+                self.Y_test_predicted - np.delete(self.Y_test, 0, 1),
+                mask=mask,
             )
             return None
-        return utils.MSE(Y_test_predicted - np.delete(self.Y_test, 0, 1))
+        return utils.MSE(
+            Y_test_predicted - np.delete(self.Y_test, 0, 1), mask=mask
+        )
 
     def repredict(self, W: np.ndarray) -> np.ndarray:
         """Re-apply a (possibly modified) weight matrix to the test set."""
@@ -402,17 +431,34 @@ class MultimodalLinearDeltaModel(MultimodalPreprocessor):
             np.delete(self.Y_test, -1, 1) + self.deltaY_test_predicted
         )
 
-    def evaluate(self, Y_test_predicted: np.ndarray | None = None):
-        """Compute MSE; if ``Y_test_predicted`` is given, return its test MSE."""
+    def evaluate(
+        self,
+        Y_test_predicted: np.ndarray | None = None,
+        mask: np.ndarray | None = None,
+    ):
+        """Compute MSE; if ``Y_test_predicted`` is given, return its test MSE.
+
+        Parameters
+        ----------
+        Y_test_predicted : np.ndarray, optional
+            If provided, return the test MSE of this prediction without
+            mutating ``self``.
+        mask : np.ndarray of dtype bool, optional
+            1-D voxel mask passed through to :func:`utils.MSE`.
+        """
         if Y_test_predicted is None:
             self.MSE_train = utils.MSE(
-                self.Y_train_predicted - np.delete(self.Y_train, 0, 1)
+                self.Y_train_predicted - np.delete(self.Y_train, 0, 1),
+                mask=mask,
             )
             self.MSE_test = utils.MSE(
-                self.Y_test_predicted - np.delete(self.Y_test, 0, 1)
+                self.Y_test_predicted - np.delete(self.Y_test, 0, 1),
+                mask=mask,
             )
             return None
-        return utils.MSE(Y_test_predicted - np.delete(self.Y_test, 0, 1))
+        return utils.MSE(
+            Y_test_predicted - np.delete(self.Y_test, 0, 1), mask=mask
+        )
 
     def repredict(self, W: np.ndarray) -> np.ndarray:
         """Re-apply a (possibly modified) weight matrix to the test set."""

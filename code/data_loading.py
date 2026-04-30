@@ -456,6 +456,178 @@ def get_rich_audio_encoding(
     return feats.T
 
 
+class AudioEncoder:
+    """Pretrained transformer audio embeddings (768-d), mirroring :class:`VideoEncoder`.
+
+    Wraps a torchaudio bundle (HuBERT-base or wav2vec2-base) and forwards
+    the waveform through it in non-overlapping segments of fixed length so
+    peak memory stays bounded — analogous to how :meth:`VideoEncoder.encode_video`
+    streams video frames in batches.
+
+    Two pipelines are exposed:
+
+    * ``'hubert_base'`` — ``torchaudio.pipelines.HUBERT_BASE``.  768-d at
+      ~50 Hz (one feature every 20 ms).  Default; best general-purpose
+      speech encoder.
+    * ``'wav2vec2_base'`` — ``torchaudio.pipelines.WAV2VEC2_BASE``.  Same
+      shape, slightly different training objective.
+
+    The encoder uses GPU if available (auto-detected) and falls back to CPU.
+    First call downloads ~360 MB of model weights into the torch hub cache.
+
+    Notes
+    -----
+    For fMRI brain-alignment tasks several papers (Vaidya et al. 2022;
+    Caucheteux et al. 2022) report that **middle layers** (around layer 9
+    of 12) work better than the last layer.  Pass ``layer=8`` (0-indexed)
+    or ``layer=9`` to :meth:`encode_audio` to try this.
+    """
+
+    PIPELINES = {
+        "hubert_base": "HUBERT_BASE",
+        "wav2vec2_base": "WAV2VEC2_BASE",
+    }
+
+    def __init__(
+        self,
+        model_name: str = "hubert_base",
+        device: str | None = None,
+    ) -> None:
+        try:
+            import torchaudio  # noqa: F401  (lazy: keep the optional dep optional)
+        except ImportError as e:
+            raise ImportError(
+                "AudioEncoder requires torchaudio.  Install with "
+                "`pip install torchaudio`."
+            ) from e
+
+        if model_name not in self.PIPELINES:
+            raise ValueError(
+                f"Unknown model_name {model_name!r}. "
+                f"Choose from {list(self.PIPELINES)}."
+            )
+
+        import torchaudio
+
+        bundle = getattr(torchaudio.pipelines, self.PIPELINES[model_name])
+        self.model_name = model_name
+        self.sample_rate: int = int(bundle.sample_rate)
+        self.model = bundle.get_model()
+        self.model.eval()
+
+        self.device = device or (
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        self.model.to(self.device)
+
+    def encode_audio(
+        self,
+        audio_path: str,
+        segment_s: float = 30.0,
+        layer: int = -1,
+    ) -> np.ndarray:
+        """Return ``(n_frames, 768)`` embeddings for the audio at ``audio_path``.
+
+        The waveform is decoded with librosa (so MP3 works on every
+        platform) and forwarded through the pretrained transformer in
+        non-overlapping segments of ``segment_s`` seconds.
+
+        Parameters
+        ----------
+        audio_path : str
+            Path to a librosa-readable audio file.
+        segment_s : float, default 30.0
+            Segment length in seconds.  Smaller segments use less RAM
+            (HuBERT self-attention is O(T²) in segment length).
+        layer : int, default -1
+            Which transformer layer to read out (-1 = last).  HuBERT-base
+            and wav2vec2-base have 12 transformer layers; mid-layers
+            (~ 9) often align better with auditory cortex BOLD.
+
+        Returns
+        -------
+        np.ndarray of shape ``(n_frames, 768)`` at ~50 Hz.
+        """
+        y, _ = librosa.load(audio_path, sr=self.sample_rate, mono=True)
+        n_samples = len(y)
+        seg_samples = int(segment_s * self.sample_rate)
+
+        embs: list[np.ndarray] = []
+        with torch.no_grad():
+            for i in tqdm(
+                range(0, n_samples, seg_samples), desc=f"Encoding audio ({self.model_name})"
+            ):
+                seg_np = y[i : i + seg_samples]
+                seg = (
+                    torch.from_numpy(seg_np)
+                    .float()
+                    .unsqueeze(0)
+                    .to(self.device)
+                )
+                features_list, _ = self.model.extract_features(seg)
+                # features_list: list of (1, T_seg, 768), one per layer.
+                emb = features_list[layer].squeeze(0).cpu().numpy()
+                embs.append(emb)
+
+        return np.concatenate(embs, axis=0)
+
+
+def get_deep_audio_encoding(
+    audio_path: str | None = None,
+    cache_path: str | None = None,
+    model_name: str = "hubert_base",
+    segment_s: float = 30.0,
+    layer: int = -1,
+    device: str | None = None,
+) -> np.ndarray:
+    """Return ``(n_frames, 768)`` deep audio embeddings, using a cache if available.
+
+    First call downloads the pretrained model (~360 MB for HuBERT-base into
+    the torch hub cache) and runs inference in segments.  Results are saved
+    to ``cache_path`` if provided so subsequent calls are instant.
+
+    Use this as a near drop-in replacement for :func:`get_audio_encoding` /
+    :func:`get_rich_audio_encoding` when 144-d hand-crafted features are
+    not enough — typically because the audio block is being out-competed
+    by the 768-d ViT video block in the gated multimodal model.
+
+    Parameters
+    ----------
+    audio_path : str, optional
+        Defaults to ``<cwd>/src/Film stimulus.mp3``.
+    cache_path : str, optional
+        Path to a ``.npy`` file used to cache the embeddings.  If the file
+        exists it is loaded directly and inference is skipped.
+    model_name : str, default 'hubert_base'
+        Pretrained pipeline name; see :attr:`AudioEncoder.PIPELINES`.
+    segment_s : float, default 30.0
+        Segment length in seconds for the forward pass (RAM control).
+    layer : int, default -1
+        Transformer layer to read out (-1 = last).
+    device : str, optional
+        ``'cpu'`` or ``'cuda'``.  Defaults to GPU if available.
+    """
+    if audio_path is None:
+        audio_path = os.path.join(os.getcwd(), "src", "Film stimulus.mp3")
+
+    if cache_path is not None and os.path.exists(cache_path):
+        print(f"[AudioEncoder] Loading cached embeddings from {cache_path}")
+        return np.load(cache_path)
+
+    print(f"[AudioEncoder] Encoding audio with {model_name} …")
+    enc = AudioEncoder(model_name=model_name, device=device)
+    vectors = enc.encode_audio(
+        audio_path, segment_s=segment_s, layer=layer,
+    )
+    print(f"[AudioEncoder] Encoded shape: {vectors.shape}")
+
+    if cache_path is not None:
+        np.save(cache_path, vectors)
+        print(f"[AudioEncoder] Saved to {cache_path}")
+
+    return vectors
+
+
 def _resample_to_grid(X: np.ndarray, t_target: np.ndarray) -> np.ndarray:
     """Linearly interpolate every column of ``X`` onto the time grid ``t_target``."""
     t_src = np.linspace(0.0, 1.0, X.shape[0])
@@ -632,6 +804,47 @@ def brain_mask(bold: np.ndarray, var_quantile: float = 0.10) -> np.ndarray:
         mask &= var_bold > var_thr
 
     return mask
+
+
+def make_brain_mask_for_sub(
+    sub: "Sub",
+    coef: int = 1,
+    var_quantile: float = 0.10,
+) -> np.ndarray:
+    """Build a brain mask on the same downsampled grid models use.
+
+    The :class:`Preprocessor` base class applies ``AvgPool3d(coef)`` to the
+    BOLD volume before flattening voxels.  This helper replicates that
+    pooling step so the resulting mask aligns voxel-for-voxel with the
+    flat ``Y_test`` / ``Y_train`` arrays the models produce — exactly what
+    you need to pass as ``mask=...`` to ``evaluate()``.
+
+    Parameters
+    ----------
+    sub : Sub
+        Subject loaded with full-resolution BOLD.
+    coef : int, default 1
+        AvgPool factor; **must match** the value passed to model
+        constructors.
+    var_quantile : float, default 0.10
+        Forwarded to :func:`brain_mask`.
+
+    Returns
+    -------
+    np.ndarray of dtype bool, shape ``(d1 // coef, d2 // coef, d3 // coef)``.
+    Use ``.reshape(-1)`` to get the 1-D voxel mask expected by
+    ``evaluate(mask=...)``.
+    """
+    if coef > 1:
+        pooled = (
+            torch.nn.AvgPool3d(coef, stride=coef)(
+                sub.tensor.permute(3, 0, 1, 2)
+            )
+            .permute(1, 2, 3, 0)
+        )
+    else:
+        pooled = sub.tensor
+    return brain_mask(pooled.numpy(), var_quantile=var_quantile)
 
 
 class Sub:
